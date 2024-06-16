@@ -1,0 +1,5 @@
+import_paths:
+  - path: go.lumeweb.com/*
+    repo_path: https://github.com/LumeWeb/*
+    branch: develop
+    vcs: git

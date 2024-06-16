@@ -1,0 +1,13 @@
+{
+  "name": "lumeweb/goimport-server",
+  "version": "0.1.0",
+  "require": {
+    "slim/slim": "4.*",
+    "slim/psr7": "^1.7",
+    "symfony/yaml": "^6.4",
+    "slim/twig-view": "^3.4"
+  },
+  "require-dev": {
+    "roave/security-advisories": "dev-latest"
+  }
+}
