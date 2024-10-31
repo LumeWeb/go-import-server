@@ -20,37 +20,7 @@ $app->add(TwigMiddleware::create($app, $twig));
 // Ensure import_paths exists
 $importPaths = $config['import_paths'] ?? [];
 
-// Helper function to parse domain parts
-function parseHostParts(string $host, string $importPath): ?array {
-	$hostParts = explode('.', $host);
-	$importParts = explode('.', rtrim($importPath, '/*'));
-
-	// Handle exact matching first
-	if ($importPath === $host) {
-		return [
-			'isWildcard' => false,
-			'matched' => $hostParts,
-			'wildcard' => []
-		];
-	}
-
-	// Handle wildcard matching
-	if (substr($importPath, -2) === '/*') {
-		// Check if the base domain matches
-		$baseDomain = implode('.', $importParts);
-		if ($host === $baseDomain) {
-			return [
-				'isWildcard' => true,
-				'matched' => $hostParts,
-				'wildcard' => []
-			];
-		}
-	}
-
-	return null;
-}
-
-// Helper function to validate Go package path
+// Validate if a path follows Go package naming rules
 function isValidGoPackagePath(string $path): bool {
 	if (empty($path)) {
 		return false;
@@ -65,63 +35,68 @@ function isValidGoPackagePath(string $path): bool {
 	return true;
 }
 
+function isExactMatch(string $requestPath, array $pathConfig): bool {
+	if (substr($pathConfig['path'], -2) === '/*') {
+		return false;
+	}
+	return $requestPath === $pathConfig['path'];
+}
+
+function findMostSpecificPath(string $host, string $path, array $importPaths): ?array {
+	$requestPath = rtrim($host . '/' . $path, '/');
+
+	// First try exact matches
+	foreach ($importPaths as $pathConfig) {
+		if (isExactMatch($requestPath, $pathConfig)) {
+			return $pathConfig;
+		}
+	}
+
+	// Skip intermediate paths
+	$pathParts = explode('/', $path);
+	if (count($pathParts) > 1 && count($pathParts) < 3) {
+		return null;
+	}
+
+	// Then try wildcard matches for full paths only
+	foreach ($importPaths as $pathConfig) {
+		if (substr($pathConfig['path'], -2) === '/*') {
+			$basePath = rtrim($pathConfig['path'], '/*');
+			if (strpos($requestPath, $basePath) === 0) {
+				return $pathConfig;
+			}
+		}
+	}
+
+	return null;
+}
+
+
+
 $app->any('/{path:.*}', function (Request $request, Response $response, array $args) use ($importPaths) {
 	$host = $request->getUri()->getHost();
 	$path = trim($args['path'] ?? '', '/');
 
-	foreach ($importPaths as $pathConfig) {
-		$importPath = $pathConfig['path'];
-		$repoPath = $pathConfig['repo_path'];
-		$vcs = $pathConfig['vcs'] ?? 'git';
-		$branch = $pathConfig['branch'] ?? 'main';
+	$matchedConfig = findMostSpecificPath($host, $path, $importPaths);
 
-		$hostInfo = parseHostParts($host, $importPath);
-		if ($hostInfo === null) {
-			continue;
-		}
-
-		// For wildcard configs, construct the proper import path
-		$importRoot = $host;
-		if (!empty($path)) {
-			$importRoot .= '/' . $path;
-		}
-
-		// Construct VCS root
-		if (substr($importPath, -2) === '/*') {
-			// Extract the project name from the path
-			$pathParts = explode('/', $path);
-			$projectName = $pathParts[0] ?? '';
-
-			if (empty($projectName)) {
-				continue;
-			}
-
-			// Replace wildcard in repo path with actual project name
-			$vcsRoot = str_replace('*', $projectName, $repoPath);
-		} else {
-			$vcsRoot = $repoPath;
-		}
-
-		// Validate the package path
-		if (!isValidGoPackagePath($path)) {
-			continue;
-		}
-
-		// Prepare template data
-		$data = [
-			'ImportRoot' => $importRoot,
-			'VCS' => $vcs,
-			'VCSRoot' => $vcsRoot,
-			'Branch' => $branch
-		];
-
-		// Return the rendered template
-		return Twig::fromRequest($request)->render($response, 'redirect.html.twig', $data);
+	if (!$matchedConfig || !isValidGoPackagePath($path)) {
+		$response->getBody()->write('404 Not Found');
+		return $response->withStatus(404);
 	}
 
-	// If no match is found, return 404 response
-	$response->getBody()->write('404 Not Found');
-	return $response->withStatus(404);
+	$requestPath = $host;
+	if (!empty($path)) {
+		$requestPath .= '/' . $path;
+	}
+
+	$data = [
+		'ImportRoot' => $requestPath,
+		'VCS' => $matchedConfig['vcs'] ?? 'git',
+		'VCSRoot' => rtrim($matchedConfig['repo_path'], '/'),
+		'Branch' => $matchedConfig['branch'] ?? 'main'
+	];
+
+	return Twig::fromRequest($request)->render($response, 'redirect.html.twig', $data);
 });
 
 $app->run();
