@@ -20,7 +20,37 @@ $app->add(TwigMiddleware::create($app, $twig));
 // Ensure import_paths exists
 $importPaths = $config['import_paths'] ?? [];
 
-// Validate if a path follows Go package naming rules
+// Helper function to parse domain parts
+function parseHostParts(string $host, string $importPath): ?array {
+	$hostParts = explode('.', $host);
+	$importParts = explode('.', rtrim($importPath, '/*'));
+
+	// Handle exact matching first
+	if ($importPath === $host) {
+		return [
+			'isWildcard' => false,
+			'matched' => $hostParts,
+			'wildcard' => []
+		];
+	}
+
+	// Handle wildcard matching
+	if (substr($importPath, -2) === '/*') {
+		// Check if the base domain matches
+		$baseDomain = implode('.', $importParts);
+		if ($host === $baseDomain) {
+			return [
+				'isWildcard' => true,
+				'matched' => $hostParts,
+				'wildcard' => []
+			];
+		}
+	}
+
+	return null;
+}
+
+// Helper function to validate Go package path
 function isValidGoPackagePath(string $path): bool {
 	if (empty($path)) {
 		return false;
@@ -35,68 +65,69 @@ function isValidGoPackagePath(string $path): bool {
 	return true;
 }
 
-function isExactMatch(string $requestPath, array $pathConfig): bool {
-	if (substr($pathConfig['path'], -2) === '/*') {
-		return false;
-	}
-	return $requestPath === $pathConfig['path'];
-}
-
-function findMostSpecificPath(string $host, string $path, array $importPaths): ?array {
-	$requestPath = rtrim($host . '/' . $path, '/');
-
-	// First try exact matches
-	foreach ($importPaths as $pathConfig) {
-		if (isExactMatch($requestPath, $pathConfig)) {
-			return $pathConfig;
-		}
-	}
-
-	// Skip intermediate paths
-	$pathParts = explode('/', $path);
-	if (count($pathParts) > 1 && count($pathParts) < 3) {
-		return null;
-	}
-
-	// Then try wildcard matches for full paths only
-	foreach ($importPaths as $pathConfig) {
-		if (substr($pathConfig['path'], -2) === '/*') {
-			$basePath = rtrim($pathConfig['path'], '/*');
-			if (strpos($requestPath, $basePath) === 0) {
-				return $pathConfig;
-			}
-		}
-	}
-
-	return null;
-}
-
-
-
 $app->any('/{path:.*}', function (Request $request, Response $response, array $args) use ($importPaths) {
 	$host = $request->getUri()->getHost();
 	$path = trim($args['path'] ?? '', '/');
 
-	$matchedConfig = findMostSpecificPath($host, $path, $importPaths);
+	foreach ($importPaths as $pathConfig) {
+		$importPath = $pathConfig['path'];
+		$repoPath = $pathConfig['repo_path'];
+		$vcs = $pathConfig['vcs'] ?? 'git';
+		$branch = $pathConfig['branch'] ?? 'main';
 
-	if (!$matchedConfig || !isValidGoPackagePath($path)) {
-		$response->getBody()->write('404 Not Found');
-		return $response->withStatus(404);
+		$hostInfo = parseHostParts($host, $importPath);
+		if ($hostInfo === null) {
+			continue;
+		}
+
+		// Construct paths
+		if (substr($importPath, -2) === '/*') {
+			// Extract the project name from the path
+			$pathParts = explode('/', $path);
+			$projectName = $pathParts[0] ?? '';
+
+			if (empty($projectName)) {
+				continue;
+			}
+
+			// Construct full repo path by appending the project name to the org URL
+			$vcsRoot = rtrim($repoPath, '/') . '/' . $projectName;
+
+			// Set import root to just the module path
+			$importRoot = $host . '/' . $projectName;
+
+			// Store any additional path components as suffix
+			$suffix = '';
+			if (count($pathParts) > 1) {
+				$suffix = '/' . implode('/', array_slice($pathParts, 1));
+			}
+		} else {
+			$vcsRoot = $repoPath;
+			$importRoot = $host;
+			$suffix = !empty($path) ? '/' . $path : '';
+		}
+
+		// Validate the package path
+		if (!isValidGoPackagePath($path)) {
+			continue;
+		}
+
+		// Prepare template data
+		$data = [
+			'ImportRoot' => $importRoot,
+			'VCS' => $vcs,
+			'VCSRoot' => $vcsRoot,
+			'Branch' => $branch,
+			'Suffix' => $suffix
+		];
+
+		// Return the rendered template
+		return Twig::fromRequest($request)->render($response, 'redirect.html.twig', $data);
 	}
 
-	$requestPath = $host;
-	if (!empty($path)) {
-		$requestPath .= '/' . $path;
-	}
-
-	$data = [
-		'ImportRoot' => $requestPath,
-		'VCS' => $matchedConfig['vcs'] ?? 'git',
-		'VCSRoot' => rtrim($matchedConfig['repo_path'], '/'),
-		'Branch' => $matchedConfig['branch'] ?? 'main'
-	];
-
-	return Twig::fromRequest($request)->render($response, 'redirect.html.twig', $data);
+	// If no match is found, return 404 response
+	$response->getBody()->write('404 Not Found');
+	return $response->withStatus(404);
 });
 
 $app->run();
